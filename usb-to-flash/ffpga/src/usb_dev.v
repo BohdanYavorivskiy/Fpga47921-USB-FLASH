@@ -44,7 +44,7 @@ module usb_dev (
     localparam [7:0] OP_LED_SET = 8'h01, OP_LED_OFF = 8'h02;
 
     // ------------------------------------------------------------------
-    // Descriptor ROM: device (0..17), configuration (18..49)
+    // Descriptor ROM: device (0..17), configuration (18..49), strings (50..63)
     // ------------------------------------------------------------------
     function [7:0] rom;
         input [5:0] a;
@@ -56,7 +56,7 @@ module usb_dev (
                 6'd8:  rom = 8'h09; 6'd9:  rom = 8'h12;               // VID 0x1209
                 6'd10: rom = 8'h01; 6'd11: rom = 8'h00;               // PID 0x0001 (test PID)
                 6'd12: rom = 8'h00; 6'd13: rom = 8'h01;               // bcdDevice 1.00
-                6'd14: rom = 8'h00; 6'd15: rom = 8'h00; 6'd16: rom = 8'h00; 6'd17: rom = 8'h01;
+                6'd14: rom = 8'h00; 6'd15: rom = 8'h01; 6'd16: rom = 8'h00; 6'd17: rom = 8'h01;
                 // configuration descriptor
                 6'd18: rom = 8'h09; 6'd19: rom = 8'h02; 6'd20: rom = 8'h20; 6'd21: rom = 8'h00;
                 6'd22: rom = 8'h01; 6'd23: rom = 8'h01; 6'd24: rom = 8'h00; 6'd25: rom = 8'h80;
@@ -71,6 +71,12 @@ module usb_dev (
                 // endpoint 1 IN, bulk, 32 bytes
                 6'd43: rom = 8'h07; 6'd44: rom = 8'h05; 6'd45: rom = 8'h81; 6'd46: rom = 8'h02;
                 6'd47: rom = 8'h20; 6'd48: rom = 8'h00; 6'd49: rom = 8'h00;
+                // English (US) language ID string descriptor
+                6'd50: rom = 8'h04; 6'd51: rom = 8'h03; 6'd52: rom = 8'h09; 6'd53: rom = 8'h04;
+                // Product string descriptor: "DEVA"
+                6'd54: rom = 8'h0A; 6'd55: rom = 8'h03;
+                6'd56: rom = 8'h44; 6'd57: rom = 8'h00; 6'd58: rom = 8'h45; 6'd59: rom = 8'h00;
+                6'd60: rom = 8'h56; 6'd61: rom = 8'h00; 6'd62: rom = 8'h41; 6'd63: rom = 8'h00;
                 default: rom = 8'h00;
             endcase
         end
@@ -325,6 +331,12 @@ module usb_dev (
                                                 ph <= P_DATA_IN;
                                             end else if (sreq_in && s_valh == 8'd2) begin
                                                 dl = 6'd32; e0src <= S_ROM; e0base <= 6'd18;
+                                                ph <= P_DATA_IN;
+                                            end else if (sreq_in && s_valh == 8'd3 && s_vall == 8'd0) begin
+                                                dl = 6'd4; e0src <= S_ROM; e0base <= 6'd50;
+                                                ph <= P_DATA_IN;
+                                            end else if (sreq_in && s_valh == 8'd3 && s_vall == 8'd1) begin
+                                                dl = 6'd10; e0src <= S_ROM; e0base <= 6'd54;
                                                 ph <= P_DATA_IN;
                                             end
                                         end
