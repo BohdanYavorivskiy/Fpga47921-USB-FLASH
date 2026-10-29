@@ -1,0 +1,387 @@
+// RTL testbench: USB host model against main (usb_phy + usb_dev)
+
+`timescale 1ns / 1ps
+
+module tb_usb_tb;
+
+  localparam real BIT = 83.3333;      // 12 Mbit/s
+
+  reg clk = 0;
+  always #10.41665 clk = ~clk;        // 48 MHz
+
+  // ---------------- DUT ----------------
+  reg  h_dp = 1, h_dn = 0, h_oe = 0;  // host driver
+  wire usb_dp, usb_dn, usb_dp_oe, usb_dn_oe, usb_pu, usb_pu_oe;
+  wire dp_line = usb_dp_oe ? usb_dp : (h_oe ? h_dp : 1'b1);
+  wire dn_line = usb_dn_oe ? usb_dn : (h_oe ? h_dn : 1'b0);
+
+  wire led_w;
+  wire osc_en, osc_mode, pll0_en, pll0_bypass;
+  wire [5:0]  pll0_refdiv;
+  wire [11:0] pll0_fbdiv;
+  wire [2:0]  pll0_postdiv0_out0, pll0_postdiv1_out0;
+  wire [1:0]  pll0_ref_clk_sel;
+  reg         pll0_lock = 0;
+
+  main dut (
+    .i_clk(clk),
+    .osc_en(osc_en), .osc_mode(osc_mode),
+    .pll0_en(pll0_en), .pll0_refdiv(pll0_refdiv), .pll0_fbdiv(pll0_fbdiv),
+    .pll0_postdiv0_out0(pll0_postdiv0_out0), .pll0_postdiv1_out0(pll0_postdiv1_out0),
+    .pll0_ref_clk_sel(pll0_ref_clk_sel), .pll0_bypass(pll0_bypass), .pll0_lock(pll0_lock),
+    .usb_dp_i(dp_line), .usb_dn_i(dn_line),
+    .usb_dp(usb_dp), .usb_dp_oe(usb_dp_oe),
+    .usb_dn(usb_dn), .usb_dn_oe(usb_dn_oe),
+    .usb_pu(usb_pu), .usb_pu_oe(usb_pu_oe),
+    .btn(1'b0), .led(led_w), .led_oe()
+  );
+
+  // ---------------- helpers ----------------
+  integer errors = 0;
+  reg [7:0] txb [0:127];
+  integer   txn;
+  reg [7:0] rxb [0:127];
+  integer   rxn;
+  reg       rxok;
+
+  task check;
+    input c;
+    input [8*32:1] msg;
+    begin
+      if (!c) begin
+        errors = errors + 1;
+        $display("[%0t] FAIL: %0s", $time, msg);
+      end
+    end
+  endtask
+
+  function [15:0] crc16f;
+    input [15:0] c;
+    input [7:0]  d;
+    integer i;
+    reg [15:0] r;
+    reg fb;
+    begin
+      r = c;
+      for (i = 0; i < 8; i = i + 1) begin
+        fb = r[15] ^ d[i];
+        r  = {r[14:0], 1'b0};
+        if (fb) r = r ^ 16'h8005;
+      end
+      crc16f = r;
+    end
+  endfunction
+
+  // CRC16 of txb[1..txn-1] appended to txb
+  task add_crc16;
+    integer i;
+    reg [15:0] c;
+    reg [15:0] x;
+    begin
+      c = 16'hFFFF;
+      for (i = 1; i < txn; i = i + 1) c = crc16f(c, txb[i]);
+      x = ~c;
+      txb[txn]   = {x[8], x[9], x[10], x[11], x[12], x[13], x[14], x[15]};
+      txb[txn+1] = {x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7]};
+      txn = txn + 2;
+    end
+  endtask
+
+  // token bytes: find the CRC5 whose residual is 5'b01100
+  task make_token;
+    input [7:0] pid;
+    input [6:0] addr;
+    input [3:0] ep;
+    integer c, i;
+    reg [4:0] r;
+    reg [15:0] v;
+    reg fb;
+    reg [4:0] cand;
+    begin
+      for (c = 0; c < 32; c = c + 1) begin
+        cand = c;
+        v = {cand, ep, addr};
+        r = 5'h1F;
+        for (i = 0; i < 16; i = i + 1) begin
+          fb = r[4] ^ v[i];
+          r  = {r[3:0], 1'b0};
+          if (fb) r = r ^ 5'h05;
+        end
+        if (r == 5'b01100) begin
+          txb[0] = pid;
+          txb[1] = v[7:0];
+          txb[2] = v[15:8];
+          txn    = 3;
+        end
+      end
+    end
+  endtask
+
+  // ---------------- host bus driver ----------------
+  task nrzi_bit;
+    input b;
+    begin
+      if (!b) begin h_dp = ~h_dp; h_dn = ~h_dn; end
+      #(BIT);
+    end
+  endtask
+
+  task send_pkt;                      // sends txb[0..txn-1]
+    integer i, j, ones;
+    reg [7:0] d;
+    begin
+      h_oe = 1; h_dp = 1; h_dn = 0;
+      for (j = 0; j < 8; j = j + 1) nrzi_bit(j == 7);
+      ones = 1;
+      for (i = 0; i < txn; i = i + 1) begin
+        d = txb[i];
+        for (j = 0; j < 8; j = j + 1) begin
+          nrzi_bit(d[j]);
+          if (d[j]) begin
+            ones = ones + 1;
+            if (ones == 6) begin nrzi_bit(1'b0); ones = 0; end
+          end else ones = 0;
+        end
+      end
+      h_dp = 0; h_dn = 0; #(2*BIT);
+      h_dp = 1; h_dn = 0; #(BIT);
+      h_oe = 0;
+    end
+  endtask
+
+  task recv_pkt;                      // fills rxb[], rxn, rxok
+    integer t, nb, ones, bp;
+    reg [1:0] prev, cur;
+    reg b, fin;
+    begin
+      rxn = 0; rxok = 0; t = 0;
+      while (!(dp_line == 1'b0 && dn_line == 1'b1) && t < 3000) begin
+        #(BIT/4); t = t + 1;
+      end
+      if (t < 3000) begin
+        #(BIT/2);
+        prev = 2'b10; nb = 0; ones = 0; bp = 0; fin = 0;
+        for (t = 0; t < 128*8; t = t + 1) rxb[t/8] = 0;
+        while (!fin) begin
+          cur = {dp_line, dn_line};
+          if (cur == 2'b00) begin
+            fin = 1;
+          end else begin
+            b = (cur == prev);
+            prev = cur;
+            if (nb < 8) begin
+              if (nb == 7) ones = 1;
+            end else if (ones == 6) begin
+              ones = 0;
+              if (b) $display("[%0t] RX stuff error", $time);
+            end else begin
+              rxb[bp/8][bp%8] = b;
+              bp = bp + 1;
+              ones = b ? ones + 1 : 0;
+            end
+            nb = nb + 1;
+            #(BIT);
+          end
+        end
+        rxn  = bp / 8;
+        rxok = 1;
+        #(2.5*BIT);
+      end
+    end
+  endtask
+
+  // receive and verify the CRC16 residual of a DATA packet
+  function crc_good;
+    input [7:0] n;                    // total bytes including PID and CRC
+    integer i;
+    reg [15:0] c;
+    begin
+      c = 16'hFFFF;
+      for (i = 1; i < n; i = i + 1) c = crc16f(c, rxb[i]);
+      crc_good = (c == 16'h800D);
+    end
+  endfunction
+
+  // ---------------- transactions ----------------
+  reg [6:0] cur_addr = 0;
+
+  task setup_xfer;
+    input [7:0] bm; input [7:0] br; input [15:0] wv; input [15:0] wi; input [15:0] wl;
+    begin
+      make_token(8'h2D, cur_addr, 4'd0); send_pkt;
+      txb[0] = 8'hC3; txb[1] = bm; txb[2] = br; txb[3] = wv[7:0]; txb[4] = wv[15:8];
+      txb[5] = wi[7:0]; txb[6] = wi[15:8]; txb[7] = wl[7:0]; txb[8] = wl[15:8]; txn = 9;
+      add_crc16; send_pkt;
+      recv_pkt;
+      check(rxok && rxn == 1 && rxb[0] == 8'hD2, "SETUP not ACKed");
+    end
+  endtask
+
+  // EP1 command helpers (alternate DATA0/DATA1 on OUT)
+  reg ep1_tog = 0;
+
+  task ep1_cmd3;
+    input [7:0] a; input [7:0] b; input [7:0] c;
+    begin
+      make_token(8'hE1, cur_addr, 4'd1); send_pkt;
+      txb[0] = ep1_tog ? 8'h4B : 8'hC3; txb[1] = a; txb[2] = b; txb[3] = c; txn = 4;
+      add_crc16; send_pkt;
+      recv_pkt;
+      check(rxok && rxn == 1 && rxb[0] == 8'hD2, "EP1 cmd3 not ACKed");
+      ep1_tog = ~ep1_tog;
+    end
+  endtask
+
+  task ep1_cmd1;
+    input [7:0] a;
+    begin
+      make_token(8'hE1, cur_addr, 4'd1); send_pkt;
+      txb[0] = ep1_tog ? 8'h4B : 8'hC3; txb[1] = a; txn = 2;
+      add_crc16; send_pkt;
+      recv_pkt;
+      check(rxok && rxn == 1 && rxb[0] == 8'hD2, "EP1 cmd1 not ACKed");
+      ep1_tog = ~ep1_tog;
+    end
+  endtask
+
+  task in_xfer;                     // IN token, expect DATA with n payload bytes; host ACKs
+    input [3:0] ep;
+    output n;
+    integer n;
+    begin
+      make_token(8'h69, cur_addr, ep); send_pkt;
+      recv_pkt;
+      n = rxn - 3;
+      check(rxok && rxn >= 3 && crc_good(rxn), "IN data bad/missing");
+      if (rxok && rxn >= 3) begin
+        txb[0] = 8'hD2; txn = 1; send_pkt;
+      end
+    end
+  endtask
+
+  integer k, nn;
+  reg [7:0] exp_b;
+  reg [7:0] dev_desc [0:17];
+  initial begin
+    dev_desc[0]=8'h12; dev_desc[1]=8'h01; dev_desc[2]=8'h00; dev_desc[3]=8'h02; dev_desc[4]=8'h00;
+    dev_desc[5]=8'h00; dev_desc[6]=8'h00; dev_desc[7]=8'h40; dev_desc[8]=8'h09; dev_desc[9]=8'h12;
+    dev_desc[10]=8'h01; dev_desc[11]=8'h00; dev_desc[12]=8'h00; dev_desc[13]=8'h01; dev_desc[14]=8'h00;
+    dev_desc[15]=8'h00; dev_desc[16]=8'h00; dev_desc[17]=8'h01;
+  end
+
+  initial begin
+    $dumpfile ("tb_usb_tb.vcd");
+    $dumpvars (0, tb_usb_tb);
+
+    #200;
+    pll0_lock = 1;
+    #1000;
+
+    // bus reset: SE0 for 5 us
+    h_oe = 1; h_dp = 0; h_dn = 0; #5000; h_dp = 1; h_dn = 0; h_oe = 0; #2000;
+
+    // ---- GET_DESCRIPTOR(device), wLength = 64 ----
+    setup_xfer(8'h80, 8'h06, 16'h0100, 16'h0000, 16'h0040);
+    in_xfer(4'd0, nn);
+    check(nn == 18, "device desc length");
+    for (k = 0; k < 18; k = k + 1) check(rxb[k+1] == dev_desc[k], "device desc byte");
+    check(rxb[0] == 8'h4B, "desc not DATA1");
+    // status stage: OUT ZLP DATA1
+    make_token(8'hE1, cur_addr, 4'd0); send_pkt;
+    txb[0] = 8'h4B; txn = 1; add_crc16; send_pkt;
+    recv_pkt;
+    check(rxok && rxn == 1 && rxb[0] == 8'hD2, "status OUT not ACKed");
+
+    // ---- GET_DESCRIPTOR(device), wLength = 8 (short) ----
+    setup_xfer(8'h80, 8'h06, 16'h0100, 16'h0000, 16'h0008);
+    in_xfer(4'd0, nn);
+    check(nn == 8, "short desc length");
+    make_token(8'hE1, cur_addr, 4'd0); send_pkt;
+    txb[0] = 8'h4B; txn = 1; add_crc16; send_pkt;
+    recv_pkt;
+    check(rxok && rxb[0] == 8'hD2, "status OUT 2 not ACKed");
+
+    // ---- SET_ADDRESS(5) ----
+    setup_xfer(8'h00, 8'h05, 16'h0005, 16'h0000, 16'h0000);
+    make_token(8'h69, cur_addr, 4'd0); send_pkt;
+    recv_pkt;
+    check(rxok && rxn == 3 && rxb[0] == 8'h4B, "SET_ADDRESS status not ZLP");
+    txb[0] = 8'hD2; txn = 1; send_pkt;
+    #2000;
+    cur_addr = 7'd5;
+
+    // ---- GET_DESCRIPTOR(configuration), wLength = 255 ----
+    setup_xfer(8'h80, 8'h06, 16'h0200, 16'h0000, 16'h00FF);
+    in_xfer(4'd0, nn);
+    check(nn == 32, "config desc length");
+    check(rxb[1] == 8'h09 && rxb[2] == 8'h02 && rxb[3] == 8'h20, "config desc header");
+    make_token(8'hE1, cur_addr, 4'd0); send_pkt;
+    txb[0] = 8'h4B; txn = 1; add_crc16; send_pkt;
+    recv_pkt;
+    check(rxok && rxb[0] == 8'hD2, "status OUT 3 not ACKed");
+
+    // ---- unsupported request -> STALL ----
+    setup_xfer(8'hC0, 8'h99, 16'h0000, 16'h0000, 16'h0008);
+    make_token(8'h69, cur_addr, 4'd0); send_pkt;
+    recv_pkt;
+    check(rxok && rxn == 1 && rxb[0] == 8'h1E, "expected STALL");
+
+    // ---- SET_CONFIGURATION(1) ----
+    setup_xfer(8'h00, 8'h09, 16'h0001, 16'h0000, 16'h0000);
+    make_token(8'h69, cur_addr, 4'd0); send_pkt;
+    recv_pkt;
+    check(rxok && rxn == 3 && rxb[0] == 8'h4B, "SET_CONFIG status not ZLP");
+    txb[0] = 8'hD2; txn = 1; send_pkt;
+    #2000;
+
+    // ---- EP1 IN with no response pending -> NAK ----
+    make_token(8'h69, cur_addr, 4'd1); send_pkt;
+    recv_pkt;
+    check(rxok && rxn == 1 && rxb[0] == 8'h5A, "EP1 IN expected NAK");
+
+    // ---- LED_SET 2 ms ----
+    ep1_cmd3(8'h01, 8'h02, 8'h00);
+    #1000;
+    check(led_w === 1'b1, "LED should be on");
+    in_xfer(4'd1, nn);
+    check(nn == 2 && rxb[0] == 8'hC3 && rxb[1] == 8'h01 && rxb[2] == 8'h00, "LED_SET response");
+    #1000000;
+    check(led_w === 1'b1, "LED should still be on at ~1 ms");
+    #1700000;
+    check(led_w === 1'b0, "LED should be off after 2 ms");
+
+    // ---- LED_SET forever ----
+    ep1_cmd3(8'h01, 8'hFF, 8'hFF);
+    #3000000;
+    check(led_w === 1'b1, "LED should be on forever");
+
+    // ---- LED_OFF ----
+    ep1_cmd1(8'h02);
+    #1000;
+    check(led_w === 1'b0, "LED should be off after LED_OFF");
+    in_xfer(4'd1, nn);
+    check(nn == 2 && rxb[1] == 8'h02 && rxb[2] == 8'h00, "LED_OFF response");
+
+    // ---- bad length and unknown opcode ----
+    ep1_cmd1(8'h01);
+    in_xfer(4'd1, nn);
+    check(nn == 2 && rxb[1] == 8'h01 && rxb[2] == 8'h01, "bad length status");
+    ep1_cmd1(8'h7F);
+    in_xfer(4'd1, nn);
+    check(nn == 2 && rxb[1] == 8'h7F && rxb[2] == 8'h02, "unknown opcode status");
+    check(led_w === 1'b0, "LED must stay off");
+
+    #5000;
+    if (errors == 0) $display("TB_USB: PASS");
+    else             $display("TB_USB: FAIL, %0d errors", errors);
+    $finish;
+  end
+
+  // watchdog
+  initial begin
+    #30000000;
+    $display("TB_USB: TIMEOUT");
+    $finish;
+  end
+
+endmodule

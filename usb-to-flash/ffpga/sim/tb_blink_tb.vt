@@ -1,0 +1,51 @@
+// RTL testbench: btn_led (button -> two LED blinks), shortened timing
+
+`timescale 1ns / 1ps
+
+module tb_blink_tb;
+
+  reg clk = 0;
+  always #10 clk = ~clk;
+
+  reg rst = 1, btn = 0;
+  wire led;
+
+  btn_led #(.DEB_BITS(4), .PH_BITS(6)) dut (.clk(clk), .rst(rst), .btn(btn), .led(led));
+
+  integer rises = 0, errors = 0;
+  reg led_d = 0;
+  always @(posedge clk) begin
+    led_d <= led;
+    if (led && !led_d) rises <= rises + 1;
+  end
+
+  initial begin
+    $dumpfile ("tb_blink_tb.vcd");
+    $dumpvars (0, tb_blink_tb);
+
+    #100 rst = 0;
+    #500;
+    if (led) begin errors = errors + 1; $display("FAIL: LED on before press"); end
+
+    // bouncing press
+    btn = 1; #40; btn = 0; #60; btn = 1; #40; btn = 0; #40; btn = 1;
+    #8000;
+    if (rises != 2) begin errors = errors + 1; $display("FAIL: expected 2 blinks, got %0d", rises); end
+    btn = 0;
+    #1000;
+    if (led) begin errors = errors + 1; $display("FAIL: LED stuck on"); end
+
+    // second press
+    btn = 1; #8000; btn = 0; #1000;
+    if (rises != 4) begin errors = errors + 1; $display("FAIL: expected 4 total blinks, got %0d", rises); end
+
+    // glitch shorter than debounce must be ignored
+    btn = 1; #100; btn = 0; #8000;
+    if (rises != 4) begin errors = errors + 1; $display("FAIL: glitch triggered blink (%0d)", rises); end
+
+    if (errors == 0) $display("TB_BLINK: PASS");
+    else             $display("TB_BLINK: FAIL, %0d errors", errors);
+    $finish;
+  end
+
+endmodule
