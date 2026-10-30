@@ -36,6 +36,17 @@
     output usb_pu_oe,       // GPIO26_OE
 
     // ----------------------------------------------
+    // SPI flash (GPIO0..GPIO3)
+    // ----------------------------------------------
+    output spi_cs,
+    output spi_cs_oe,
+    output spi_clk,
+    output spi_clk_oe,
+    input  spi_miso_i,
+    output spi_mosi,
+    output spi_mosi_oe,
+
+    // ----------------------------------------------
     // Button (GPIO36, active high) and LED (GPIO4, active high)
     // ----------------------------------------------
     input  btn,             // GPIO36_IN
@@ -96,6 +107,9 @@
     wire        led_set, led_off;
     wire [15:0] led_ms;
     wire        led_usb, led_btn;
+    wire        spi_start, spi_cs_n_req;
+    wire [7:0]  spi_tx, spi_rx, spi_divider;
+    wire        spi_busy, spi_done, spi_cs_n, spi_sck, spi_mosi_w;
 
     usb_dev u_dev (
         .clk       (i_clk),
@@ -112,7 +126,32 @@
         .tx_next   (tx_next),
         .led_set   (led_set),
         .led_off   (led_off),
-        .led_ms    (led_ms)
+        .led_ms    (led_ms),
+        .spi_start (spi_start),
+        .spi_tx    (spi_tx),
+        .spi_cs_n_req(spi_cs_n_req),
+        .spi_divider(spi_divider),
+        .spi_rx    (spi_rx),
+        .spi_busy  (spi_busy),
+        .spi_done  (spi_done)
+    );
+
+    spi_master #(
+        .CLK_HZ (48_000_000)
+    ) u_spi_master (
+        .clk         (i_clk),
+        .rst         (rst),
+        .cs_n_req    (spi_cs_n_req),
+        .clk_divider (spi_divider),
+        .start       (spi_start),
+        .tx_data     (spi_tx),
+        .miso        (spi_miso_i),
+        .cs_n        (spi_cs_n),
+        .sck         (spi_sck),
+        .mosi        (spi_mosi_w),
+        .busy        (spi_busy),
+        .done        (spi_done),
+        .rx_data     (spi_rx)
     );
 
     led_ctrl u_led_ctrl (
@@ -132,6 +171,13 @@
     // soft-connect: pull D+ high through GPIO26 once the clock is running
     assign usb_pu    = 1'b1;
     assign usb_pu_oe = ~rst;
+
+    assign spi_cs       = spi_cs_n;
+    assign spi_cs_oe    = 1'b1;
+    assign spi_clk      = spi_sck;
+    assign spi_clk_oe   = 1'b1;
+    assign spi_mosi     = spi_mosi_w;
+    assign spi_mosi_oe  = 1'b1;
 
     // ----------------------------------------------
     // "Bitstream is loaded" indicator: LED blinks twice on button press

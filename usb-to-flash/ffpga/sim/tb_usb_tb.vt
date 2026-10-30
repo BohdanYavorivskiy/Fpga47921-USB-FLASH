@@ -14,6 +14,8 @@ module tb_usb_tb;
   wire usb_dp, usb_dn, usb_dp_oe, usb_dn_oe, usb_pu, usb_pu_oe;
   wire dp_line = usb_dp_oe ? usb_dp : (h_oe ? h_dp : 1'b1);
   wire dn_line = usb_dn_oe ? usb_dn : (h_oe ? h_dn : 1'b0);
+  wire spi_cs, spi_clk, spi_mosi;
+  reg  spi_miso = 1'b0;
 
   wire led_w;
   wire osc_en, osc_mode, pll0_en, pll0_bypass;
@@ -33,6 +35,10 @@ module tb_usb_tb;
     .usb_dp(usb_dp), .usb_dp_oe(usb_dp_oe),
     .usb_dn(usb_dn), .usb_dn_oe(usb_dn_oe),
     .usb_pu(usb_pu), .usb_pu_oe(usb_pu_oe),
+    .spi_cs(spi_cs), .spi_cs_oe(),
+    .spi_clk(spi_clk), .spi_clk_oe(),
+    .spi_miso_i(spi_miso),
+    .spi_mosi(spi_mosi), .spi_mosi_oe(),
     .btn(1'b0), .led(led_w), .led_oe()
   );
 
@@ -43,6 +49,23 @@ module tb_usb_tb;
   reg [7:0] rxb [0:127];
   integer   rxn;
   reg       rxok;
+  reg       spi_monitor = 1'b0;
+  reg [7:0] spi_expected_tx = 8'd0;
+  reg [7:0] spi_slave_rx = 8'd0;
+  integer   spi_bit_index = 0;
+  integer   spi_edge_count = 0;
+
+  always @(posedge spi_clk) begin
+    if (spi_monitor && !spi_cs) begin
+      if (spi_mosi !== spi_expected_tx[7-spi_bit_index]) begin
+        errors = errors + 1;
+        $display("[%0t] FAIL: SPI MOSI bit %0d was incorrect", $time, spi_bit_index);
+      end
+      spi_miso = spi_slave_rx[7-spi_bit_index];
+      spi_bit_index = spi_bit_index + 1;
+      spi_edge_count = spi_edge_count + 1;
+    end
+  end
 
   task check;
     input c;
@@ -244,6 +267,18 @@ module tb_usb_tb;
     end
   endtask
 
+  task ep1_cmd2;
+    input [7:0] a; input [7:0] b;
+    begin
+      make_token(8'hE1, cur_addr, 4'd1); send_pkt;
+      txb[0] = ep1_tog ? 8'h4B : 8'hC3; txb[1] = a; txb[2] = b; txn = 3;
+      add_crc16; send_pkt;
+      recv_pkt;
+      check(rxok && rxn == 1 && rxb[0] == 8'hD2, "EP1 cmd2 not ACKed");
+      ep1_tog = ~ep1_tog;
+    end
+  endtask
+
   task in_xfer;                     // IN token, expect DATA with n payload bytes; host ACKs
     input [3:0] ep;
     output n;
@@ -266,7 +301,7 @@ module tb_usb_tb;
     dev_desc[0]=8'h12; dev_desc[1]=8'h01; dev_desc[2]=8'h00; dev_desc[3]=8'h02; dev_desc[4]=8'h00;
     dev_desc[5]=8'h00; dev_desc[6]=8'h00; dev_desc[7]=8'h40; dev_desc[8]=8'h09; dev_desc[9]=8'h12;
     dev_desc[10]=8'h01; dev_desc[11]=8'h00; dev_desc[12]=8'h00; dev_desc[13]=8'h01; dev_desc[14]=8'h00;
-    dev_desc[15]=8'h00; dev_desc[16]=8'h00; dev_desc[17]=8'h01;
+    dev_desc[15]=8'h01; dev_desc[16]=8'h00; dev_desc[17]=8'h01;
   end
 
   initial begin
@@ -301,6 +336,31 @@ module tb_usb_tb;
     recv_pkt;
     check(rxok && rxb[0] == 8'hD2, "status OUT 2 not ACKed");
 
+    // ---- GET_DESCRIPTOR(string, language ID) ----
+    setup_xfer(8'h80, 8'h06, 16'h0300, 16'h0000, 16'h0004);
+    in_xfer(4'd0, nn);
+    check(nn == 4, "language string descriptor length");
+    check(rxb[1] == 8'h04 && rxb[2] == 8'h03 &&
+          rxb[3] == 8'h09 && rxb[4] == 8'h04, "language string descriptor");
+    make_token(8'hE1, cur_addr, 4'd0); send_pkt;
+    txb[0] = 8'h4B; txn = 1; add_crc16; send_pkt;
+    recv_pkt;
+    check(rxok && rxn == 1 && rxb[0] == 8'hD2, "language string status OUT");
+
+    // ---- GET_DESCRIPTOR(string, product "DEVA") ----
+    setup_xfer(8'h80, 8'h06, 16'h0301, 16'h0409, 16'h000A);
+    in_xfer(4'd0, nn);
+    check(nn == 10, "product string descriptor length");
+    check(rxb[1] == 8'h0A && rxb[2] == 8'h03 &&
+          rxb[3] == 8'h44 && rxb[4] == 8'h00 &&
+          rxb[5] == 8'h45 && rxb[6] == 8'h00 &&
+          rxb[7] == 8'h56 && rxb[8] == 8'h00 &&
+          rxb[9] == 8'h41 && rxb[10] == 8'h00, "product string descriptor");
+    make_token(8'hE1, cur_addr, 4'd0); send_pkt;
+    txb[0] = 8'h4B; txn = 1; add_crc16; send_pkt;
+    recv_pkt;
+    check(rxok && rxn == 1 && rxb[0] == 8'hD2, "product string status OUT");
+
     // ---- SET_ADDRESS(5) ----
     setup_xfer(8'h00, 8'h05, 16'h0005, 16'h0000, 16'h0000);
     make_token(8'h69, cur_addr, 4'd0); send_pkt;
@@ -333,6 +393,16 @@ module tb_usb_tb;
     check(rxok && rxn == 3 && rxb[0] == 8'h4B, "SET_CONFIG status not ZLP");
     txb[0] = 8'hD2; txn = 1; send_pkt;
     #2000;
+
+    // ---- GET_CONFIGURATION without resetting the bulk endpoint toggles ----
+    setup_xfer(8'h80, 8'h08, 16'h0000, 16'h0000, 16'h0001);
+    in_xfer(4'd0, nn);
+    check(nn == 1 && rxb[1] == 8'h01, "GET_CONFIGURATION should return 1");
+    make_token(8'hE1, cur_addr, 4'd0); send_pkt;
+    txb[0] = 8'h4B; txn = 1; add_crc16; send_pkt;
+    recv_pkt;
+    check(rxok && rxn == 1 && rxb[0] == 8'hD2,
+          "GET_CONFIGURATION status OUT not ACKed");
 
     // ---- EP1 IN with no response pending -> NAK ----
     make_token(8'h69, cur_addr, 4'd1); send_pkt;
@@ -370,6 +440,107 @@ module tb_usb_tb;
     in_xfer(4'd1, nn);
     check(nn == 2 && rxb[1] == 8'h7F && rxb[2] == 8'h02, "unknown opcode status");
     check(led_w === 1'b0, "LED must stay off");
+
+    // ---- SPI host interface over EP1 ----
+    ep1_cmd2(8'h10, 8'hFF);          // transfer is rejected while CS# is high
+    in_xfer(4'd1, nn);
+    check(nn == 3 && rxb[1] == 8'h10 && rxb[2] == 8'h04,
+          "SPI transfer must require asserted CS#");
+
+    ep1_cmd2(8'h12, 8'h01);          // divider 1: 24 MHz at this 48 MHz clock
+    in_xfer(4'd1, nn);
+    check(nn == 2 && rxb[1] == 8'h12 && rxb[2] == 8'h00,
+          "SPI divider response");
+
+    ep1_cmd2(8'h11, 8'h01);          // assert CS#
+    in_xfer(4'd1, nn);
+    check(nn == 2 && rxb[1] == 8'h11 && rxb[2] == 8'h00,
+          "SPI CS assert response");
+    check(spi_cs === 1'b0, "SPI CS# was not asserted");
+
+    spi_expected_tx = 8'h9F;
+    spi_slave_rx = 8'hA6;
+    spi_bit_index = 0;
+    spi_edge_count = 0;
+    spi_monitor = 1'b1;
+    ep1_cmd2(8'h10, spi_expected_tx);
+    in_xfer(4'd1, nn);
+    spi_monitor = 1'b0;
+    check(nn == 3 && rxb[1] == 8'h10 && rxb[2] == 8'h00 &&
+          rxb[3] == spi_slave_rx, "SPI transfer response");
+    check(spi_edge_count == 8, "SPI transfer must contain eight bits");
+    check(spi_cs === 1'b0, "SPI CS# must stay low between bytes");
+
+    spi_expected_tx = 8'h3C;
+    spi_slave_rx = 8'h5A;
+    spi_bit_index = 0;
+    spi_edge_count = 0;
+    spi_monitor = 1'b1;
+    ep1_cmd2(8'h10, spi_expected_tx);
+    in_xfer(4'd1, nn);
+    spi_monitor = 1'b0;
+    check(nn == 3 && rxb[1] == 8'h10 && rxb[2] == 8'h00 &&
+          rxb[3] == spi_slave_rx, "second SPI transfer response");
+    check(spi_edge_count == 8, "second SPI transfer must contain eight bits");
+    check(spi_cs === 1'b0, "SPI CS# must remain asserted for repeated bytes");
+
+    // Match flash-read: opcode, 24-bit address, then a continuous data read.
+    spi_expected_tx = 8'h03;
+    spi_slave_rx = 8'h00;
+    spi_bit_index = 0;
+    spi_edge_count = 0;
+    spi_monitor = 1'b1;
+    ep1_cmd2(8'h10, spi_expected_tx);
+    in_xfer(4'd1, nn);
+    spi_monitor = 1'b0;
+    check(nn == 3 && rxb[1] == 8'h10 && rxb[2] == 8'h00,
+          "flash READ opcode response");
+
+    for (k = 0; k < 3; k = k + 1) begin
+      spi_expected_tx = 8'h00;
+      spi_slave_rx = 8'h00;
+      spi_bit_index = 0;
+      spi_edge_count = 0;
+      spi_monitor = 1'b1;
+      ep1_cmd2(8'h10, spi_expected_tx);
+      in_xfer(4'd1, nn);
+      spi_monitor = 1'b0;
+      check(nn == 3 && rxb[1] == 8'h10 && rxb[2] == 8'h00,
+            "flash READ address response");
+    end
+
+    for (k = 0; k < 256; k = k + 1) begin
+      spi_expected_tx = k[7:0];
+      spi_slave_rx = k[7:0];
+      spi_bit_index = 0;
+      spi_edge_count = 0;
+      spi_monitor = 1'b1;
+      ep1_cmd2(8'h10, spi_expected_tx);
+      in_xfer(4'd1, nn);
+      spi_monitor = 1'b0;
+      check(nn == 3 && rxb[1] == 8'h10 && rxb[2] == 8'h00 &&
+            rxb[3] == spi_slave_rx, "repeated SPI transfer response");
+      check(spi_edge_count == 8, "repeated SPI transfer must contain eight bits");
+    end
+
+    ep1_cmd2(8'h11, 8'h02);          // invalid CS value must leave CS# asserted
+    in_xfer(4'd1, nn);
+    check(nn == 2 && rxb[1] == 8'h11 && rxb[2] == 8'h01,
+          "invalid SPI CS value must be rejected");
+    check(spi_cs === 1'b0, "invalid SPI CS value changed CS#");
+
+    ep1_cmd2(8'h11, 8'h00);          // release CS#
+    in_xfer(4'd1, nn);
+    check(nn == 2 && rxb[1] == 8'h11 && rxb[2] == 8'h00,
+          "SPI CS release response");
+    check(spi_cs === 1'b1, "SPI CS# was not released");
+    check(spi_clk === 1'b0, "SPI SCK must be low while idle");
+
+    // ---- USB IN debug command returns a fixed payload ----
+    ep1_cmd1(8'h33);
+    in_xfer(4'd1, nn);
+    check(nn == 3 && rxb[1] == 8'h33 && rxb[2] == 8'h00 &&
+          rxb[3] == 8'h5A, "USB debug command response");
 
     #5000;
     if (errors == 0) $display("TB_USB: PASS");
