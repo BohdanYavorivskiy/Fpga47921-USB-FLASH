@@ -95,7 +95,7 @@
 
     wire        led_set, led_off;
     wire [15:0] led_ms;
-    wire        led_usb, led_btn;
+    wire        led_usb, led_btn, tick_ms;
 
     usb_dev u_dev (
         .clk       (i_clk),
@@ -121,7 +121,8 @@
         .set (led_set),
         .off (led_off),
         .ms  (led_ms),
-        .led (led_usb)
+        .led (led_usb),
+        .tick_ms (tick_ms)
     );
 
     assign usb_dp   = dp_o;
@@ -140,6 +141,7 @@
         .clk (i_clk),
         .rst (rst),
         .btn (btn),
+        .tick (tick_ms),
         .led (led_btn)
     );
     assign led = led_btn | led_usb;

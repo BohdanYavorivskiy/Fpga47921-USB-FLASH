@@ -11,7 +11,8 @@ module led_ctrl #(
     input  wire        set,
     input  wire        off,
     input  wire [15:0] ms,
-    output wire        led
+    output wire        led,
+    output wire        tick_ms     // 1 clk pulse per ms (shared with btn_led)
 );
 
     reg [15:0] tcnt;
@@ -40,6 +41,7 @@ module led_ctrl #(
         end
     end
 
+    assign tick_ms = tick;
     assign led = always_on || (rem != 16'd0);
 
 endmodule

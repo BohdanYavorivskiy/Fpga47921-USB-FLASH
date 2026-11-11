@@ -36,6 +36,8 @@ module tb_usb_tb;
     .btn(1'b0), .led(led_w), .led_oe()
   );
 
+  defparam dut.u_btn_led.BOOT_BLINKS = 0;   // no power-up blinks in the USB test
+
   // ---------------- helpers ----------------
   integer errors = 0;
   reg [7:0] txb [0:127];

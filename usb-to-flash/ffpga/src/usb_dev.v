@@ -133,7 +133,13 @@ module usb_dev (
     // ------------------------------------------------------------------
     reg [7:0] pid;
     reg [7:0] tb1, tb2;
-    reg [7:0] s_type, s_req, s_vall, s_valh, s_lenl, s_lenh;
+    // setup packet fields, stored only as wide as the decoding needs
+    reg       s_in;               // bmRequestType[7]: device-to-host
+    reg [7:0] s_req;
+    reg [6:0] s_vall;
+    reg [1:0] s_valh;             // wValue high: 1 -> device, 2 -> config, else 0
+    reg [7:0] s_lenl;
+    reg       s_lenh_nz;          // wLength high byte != 0
 
     reg [6:0] dev_addr, pend_addr;
     reg       cfg;
@@ -146,7 +152,7 @@ module usb_dev (
 
     // EP1: ep1_full = a 2-byte response {resp_op, resp_st} is waiting for the host
     reg       ep1_full, ep1_in_tog, ep1_out_tog;
-    reg [7:0] c_op, c_l, c_h;          // command bytes of the packet being received
+    reg [7:0] c_h;                     // 3rd data byte (c_op = tb1, c_l = tb2)
     reg [7:0] resp_op, resp_st;
 
     // TX packet description
@@ -230,12 +236,12 @@ module usb_dev (
         if (byte_v) begin
             case (byte_i)
                 6'd0: pid <= byte_d;
-                6'd1: begin tb1 <= byte_d; c_op <= byte_d; if (expect_ == E_SETUP) s_type <= byte_d; end
-                6'd2: begin tb2 <= byte_d; c_l  <= byte_d; if (expect_ == E_SETUP) s_req  <= byte_d; end
-                6'd3: begin c_h <= byte_d; if (expect_ == E_SETUP) s_vall <= byte_d; end
-                6'd4: if (expect_ == E_SETUP) s_valh <= byte_d;
+                6'd1: begin tb1 <= byte_d; if (expect_ == E_SETUP) s_in <= byte_d[7]; end
+                6'd2: begin tb2 <= byte_d; if (expect_ == E_SETUP) s_req <= byte_d; end
+                6'd3: begin c_h <= byte_d; if (expect_ == E_SETUP) s_vall <= byte_d[6:0]; end
+                6'd4: if (expect_ == E_SETUP) s_valh <= (byte_d == 8'd1) ? 2'd1 : (byte_d == 8'd2) ? 2'd2 : 2'd0;
                 6'd7: if (expect_ == E_SETUP) s_lenl <= byte_d;
-                6'd8: if (expect_ == E_SETUP) s_lenh <= byte_d;
+                6'd8: if (expect_ == E_SETUP) s_lenh_nz <= |byte_d;
                 default: ;
             endcase
         end
@@ -312,7 +318,7 @@ module usb_dev (
                                 if (f_setup) begin
                                     go = 1'b1; rpid = PID_ACK; rhas = 1'b0;
                                     rsrc = S_ZERO; rbase = 6'd0; rlen = 6'd0;
-                                    sreq_in = s_type[7];
+                                    sreq_in = s_in;
                                     ph     <= P_STALL;
                                     e0src  <= S_ZERO;
                                     e0base <= 6'd0;
@@ -320,10 +326,10 @@ module usb_dev (
                                     dl = 6'd0;
                                     case (s_req)
                                         8'h06: begin                       // GET_DESCRIPTOR
-                                            if (sreq_in && s_valh == 8'd1) begin
+                                            if (sreq_in && s_valh == 2'd1) begin
                                                 dl = 6'd18; e0src <= S_ROM; e0base <= 6'd0;
                                                 ph <= P_DATA_IN;
-                                            end else if (sreq_in && s_valh == 8'd2) begin
+                                            end else if (sreq_in && s_valh == 2'd2) begin
                                                 dl = 6'd32; e0src <= S_ROM; e0base <= 6'd18;
                                                 ph <= P_DATA_IN;
                                             end
@@ -338,7 +344,7 @@ module usb_dev (
                                             dl = 6'd1; e0src <= S_ZERO; ph <= P_DATA_IN;
                                         end
                                         8'h05: if (!sreq_in) begin         // SET_ADDRESS
-                                            pend_addr <= s_vall[6:0]; ph <= P_STAT_IN;
+                                            pend_addr <= s_vall; ph <= P_STAT_IN;
                                         end
                                         8'h09: if (!sreq_in) begin         // SET_CONFIGURATION
                                             cfg         <= s_vall[0];
@@ -353,9 +359,9 @@ module usb_dev (
                                         default: ;
                                     endcase
                                     if (dl != 6'd0) begin
-                                        if (s_lenh != 8'd0 || s_lenl > {2'b00, dl}) e0len <= dl;
+                                        if (s_lenh_nz || s_lenl > {2'b00, dl}) e0len <= dl;
                                         else                                         e0len <= s_lenl[5:0];
-                                        if (s_lenh == 8'd0 && s_lenl == 8'd0) ph <= P_STAT_IN;
+                                        if (!s_lenh_nz && s_lenl == 8'd0) ph <= P_STAT_IN;
                                     end
                                 end
                             end
@@ -381,16 +387,16 @@ module usb_dev (
                                         rpid        = PID_ACK;
                                         ep1_out_tog <= ~ep1_out_tog;
                                         ep1_full    <= 1'b1;         // response ready (replaces any unread one)
-                                        resp_op     <= c_op;
+                                        resp_op     <= tb1;
                                         resp_st     <= 8'd2;         // unknown opcode
                                         if (ridx == 6'd3) resp_st <= 8'd1;   // empty packet
                                         else begin
-                                            case (c_op)
+                                            case (tb1)
                                                 OP_LED_SET: begin
                                                     if (ridx == 6'd6) begin
                                                         resp_st <= 8'd0;
                                                         led_set <= 1'b1;
-                                                        led_ms  <= {c_h, c_l};
+                                                        led_ms  <= {c_h, tb2};
                                                     end else begin
                                                         resp_st <= 8'd1;
                                                     end

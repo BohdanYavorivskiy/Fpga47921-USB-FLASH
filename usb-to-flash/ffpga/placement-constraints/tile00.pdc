@@ -1,0 +1,7 @@
+create_placement_group tile00_grp chip_tile_x=0, chip_tile_y=0, chip_x=0, chip_y=0, chip_tile_x=0, chip_tile_y=0, chip_x=31, chip_y=31
+add_to_placement_group tile00_grp [get_cells u_*]
+add_to_placement_group tile00_grp [get_cells *_LUT*]
+add_to_placement_group tile00_grp [get_cells *_FDRE_Q]
+add_to_placement_group tile00_grp [get_cells *_FDSE_Q]
+add_to_placement_group tile00_grp [get_cells *_CARRY4*]
+add_to_placement_group tile00_grp [get_cells *_INV_O]

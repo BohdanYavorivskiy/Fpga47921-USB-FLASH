@@ -1,0 +1,7 @@
+/dist/
+build/
+!/usb-to-flash/ffpga/build/
+/usb-to-flash/ffpga/build/*
+!/usb-to-flash/ffpga/build/bitstream/
+/USB LED Control.spec
+/packaging/USB LED Control.spec
