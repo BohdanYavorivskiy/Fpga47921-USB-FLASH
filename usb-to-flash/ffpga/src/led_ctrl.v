@@ -1,47 +1,36 @@
-// LED on-time controller driven by USB commands.
-//   set : load on-time in ms (16'hFFFF = on always_on, 0 = off)
-//   off : turn LED off
-// TICK_DIV = clk cycles per millisecond (48 MHz -> 48000).
+// LED controller + shared 1.365 ms time base.
+//   LED = force_on (set by USB command) | USB activity (stretched pulse).
+//   act: one clk pulse per USB transaction addressed to the device;
+//        the LED stays on for ACT_TICKS ticks (~1.4 ms each) after the last one.
+// The time base is a 16-bit LFSR (period 65535 clk = 1.365 ms at 48 MHz),
+// which needs no carry chain, unlike a binary counter.
 
 module led_ctrl #(
-    parameter TICK_DIV = 48000
+    parameter ACT_TICKS = 15      // ~20 ms
 ) (
-    input  wire        clk,
-    input  wire        rst,
-    input  wire        set,
-    input  wire        off,
-    input  wire [15:0] ms,
-    output wire        led,
-    output wire        tick_ms     // 1 clk pulse per ms (shared with btn_led)
+    input  wire clk,
+    input  wire rst,
+    input  wire force_on,
+    input  wire act,
+    output wire led,
+    output reg  tick_ms
 );
 
-    reg [15:0] tcnt;
-    reg [15:0] rem;
-    reg        always_on;
-
-    wire tick = (tcnt == TICK_DIV - 1);
+    reg [15:0] lfsr;
+    reg [3:0]  act_cnt;
 
     always @(posedge clk) begin
-        if (rst || off) begin
-            always_on <= 1'b0;
-            rem     <= 16'd0;
-            tcnt    <= 16'd0;
-        end else if (set) begin
-            tcnt <= 16'd0;
-            if (ms == 16'hFFFF) begin
-                always_on <= 1'b1;
-                rem     <= 16'd0;
-            end else begin
-                always_on <= 1'b0;
-                rem     <= ms;
-            end
-        end else begin
-            tcnt <= tick ? 16'd0 : tcnt + 16'd1;
-            if (tick && rem != 16'd0) rem <= rem - 16'd1;
-        end
+        if (rst) lfsr <= 16'hACE1;
+        else     lfsr <= {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10]};
+        tick_ms <= (lfsr == 16'hACE1);
     end
 
-    assign tick_ms = tick;
-    assign led = always_on || (rem != 16'd0);
+    always @(posedge clk) begin
+        if (rst)                          act_cnt <= 4'd0;
+        else if (act)                     act_cnt <= ACT_TICKS;
+        else if (tick_ms && act_cnt != 0) act_cnt <= act_cnt - 4'd1;
+    end
+
+    assign led = force_on || (act_cnt != 4'd0);
 
 endmodule

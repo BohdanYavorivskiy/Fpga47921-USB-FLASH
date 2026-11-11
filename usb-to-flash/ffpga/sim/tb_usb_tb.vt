@@ -16,6 +16,8 @@ module tb_usb_tb;
   wire dn_line = usb_dn_oe ? usb_dn : (h_oe ? h_dn : 1'b0);
 
   wire led_w;
+  wire spi_cs_w, spi_clk_w, spi_mosi_w;
+  wire spi_miso_w;
   wire osc_en, osc_mode, pll0_en, pll0_bypass;
   wire [5:0]  pll0_refdiv;
   wire [11:0] pll0_fbdiv;
@@ -33,10 +35,23 @@ module tb_usb_tb;
     .usb_dp(usb_dp), .usb_dp_oe(usb_dp_oe),
     .usb_dn(usb_dn), .usb_dn_oe(usb_dn_oe),
     .usb_pu(usb_pu), .usb_pu_oe(usb_pu_oe),
+    .spi_cs(spi_cs_w), .spi_cs_oe(), .spi_clk(spi_clk_w), .spi_clk_oe(),
+    .spi_miso_i(spi_miso_w), .spi_mosi(spi_mosi_w), .spi_mosi_oe(),
     .btn(1'b0), .led(led_w), .led_oe()
   );
 
+  // ---------------- SPI slave model (mode 0), returns 8'h3C, records MOSI ----------------
+  wire [7:0] SLV_TX = 8'h3C;
+  reg  [2:0] slv_bit = 0;
+  reg  [7:0] slv_rx  = 0;
+  integer    slv_clks = 0;
+  assign spi_miso_w = spi_cs_w ? 1'b1 : SLV_TX[7 - slv_bit];
+  always @(negedge spi_cs_w) begin slv_bit <= 0; slv_clks <= 0; end
+  always @(posedge spi_clk_w) begin slv_rx <= {slv_rx[6:0], spi_mosi_w}; slv_clks <= slv_clks + 1; end
+  always @(negedge spi_clk_w) slv_bit <= slv_bit + 3'd1;
+
   defparam dut.u_btn_led.BOOT_BLINKS = 0;   // no power-up blinks in the USB test
+  defparam dut.u_led_ctrl.ACT_TICKS  = 1;   // short activity stretch (~1.4 ms)
 
   // ---------------- helpers ----------------
   integer errors = 0;
@@ -234,6 +249,18 @@ module tb_usb_tb;
     end
   endtask
 
+  task ep1_cmd2;
+    input [7:0] a; input [7:0] b;
+    begin
+      make_token(8'hE1, cur_addr, 4'd1); send_pkt;
+      txb[0] = ep1_tog ? 8'h4B : 8'hC3; txb[1] = a; txb[2] = b; txn = 3;
+      add_crc16; send_pkt;
+      recv_pkt;
+      check(rxok && rxn == 1 && rxb[0] == 8'hD2, "EP1 cmd2 not ACKed");
+      ep1_tog = ~ep1_tog;
+    end
+  endtask
+
   task ep1_cmd1;
     input [7:0] a;
     begin
@@ -341,28 +368,67 @@ module tb_usb_tb;
     recv_pkt;
     check(rxok && rxn == 1 && rxb[0] == 8'h5A, "EP1 IN expected NAK");
 
-    // ---- LED_SET 2 ms ----
-    ep1_cmd3(8'h01, 8'h02, 8'h00);
+    // ---- LED follows USB activity ----
+    check(led_w === 1'b1, "LED should be on after USB traffic");
+    #4000000;
+    check(led_w === 1'b0, "LED should go off when bus is idle");
+    make_token(8'h69, cur_addr, 4'd1); send_pkt;          // any transaction
+    recv_pkt;
     #1000;
-    check(led_w === 1'b1, "LED should be on");
+    check(led_w === 1'b1, "LED should light during a transfer");
+    #4000000;
+    check(led_w === 1'b0, "LED should go off again");
+
+    // ---- LED_SET (forced on) / LED_OFF ----
+    ep1_cmd3(8'h01, 8'h02, 8'h00);
     in_xfer(4'd1, nn);
     check(nn == 2 && rxb[0] == 8'hC3 && rxb[1] == 8'h01 && rxb[2] == 8'h00, "LED_SET response");
-    #1000000;
-    check(led_w === 1'b1, "LED should still be on at ~1 ms");
-    #1700000;
-    check(led_w === 1'b0, "LED should be off after 2 ms");
-
-    // ---- LED_SET forever ----
-    ep1_cmd3(8'h01, 8'hFF, 8'hFF);
-    #3000000;
-    check(led_w === 1'b1, "LED should be on forever");
-
-    // ---- LED_OFF ----
+    #4000000;
+    check(led_w === 1'b1, "LED should stay forced on");
     ep1_cmd1(8'h02);
-    #1000;
-    check(led_w === 1'b0, "LED should be off after LED_OFF");
     in_xfer(4'd1, nn);
     check(nn == 2 && rxb[1] == 8'h02 && rxb[2] == 8'h00, "LED_OFF response");
+    #4000000;
+    check(led_w === 1'b0, "LED should be off after LED_OFF");
+
+    // ---- SPI ----
+    check(spi_cs_w === 1'b1 && spi_clk_w === 1'b0, "SPI idle levels");
+    ep1_cmd1(8'h10);                                     // missing TX byte
+    in_xfer(4'd1, nn);
+    check(nn == 3 && rxb[1] == 8'h10 && rxb[2] == 8'h03, "SPI xfer bad length");
+    ep1_cmd2(8'h10, 8'h55);                               // CS not asserted
+    in_xfer(4'd1, nn);
+    check(nn == 3 && rxb[1] == 8'h10 && rxb[2] == 8'h04, "xfer without CS status");
+    ep1_cmd2(8'h12, 8'h00);                               // bad divider
+    in_xfer(4'd1, nn);
+    check(nn == 2 && rxb[1] == 8'h12 && rxb[2] == 8'h01, "divider 0 rejected");
+    ep1_cmd2(8'h12, 8'h02);
+    in_xfer(4'd1, nn);
+    check(nn == 2 && rxb[2] == 8'h00, "divider set");
+    ep1_cmd2(8'h11, 8'h01);                               // assert CS
+    in_xfer(4'd1, nn);
+    check(nn == 2 && rxb[1] == 8'h11 && rxb[2] == 8'h00, "CS assert response");
+    check(spi_cs_w === 1'b0, "CS# should be low");
+    ep1_cmd2(8'h10, 8'hA5);
+    #5000;
+    in_xfer(4'd1, nn);
+    check(nn == 3 && rxb[1] == 8'h10 && rxb[2] == 8'h00 && rxb[3] == 8'h3C, "xfer 1 response/MISO");
+    check(slv_rx == 8'hA5 && slv_clks == 8, "xfer 1 MOSI/clock count");
+    ep1_cmd2(8'h10, 8'h5A);
+    #5000;
+    in_xfer(4'd1, nn);
+    check(nn == 3 && rxb[3] == 8'h3C, "xfer 2 MISO");
+    check(slv_rx == 8'h5A && slv_clks == 16, "xfer 2 MOSI/clock count");
+    check(spi_cs_w === 1'b0 && spi_clk_w === 1'b0, "CS held, SCK idle low");
+    ep1_cmd2(8'h12, 8'h0F);                               // slowest divider, one byte
+    in_xfer(4'd1, nn);
+    ep1_cmd2(8'h10, 8'hC3);
+    #20000;
+    in_xfer(4'd1, nn);
+    check(nn == 3 && rxb[3] == 8'h3C && slv_rx == 8'hC3, "xfer at div 15");
+    ep1_cmd2(8'h11, 8'h00);                               // release CS
+    in_xfer(4'd1, nn);
+    check(spi_cs_w === 1'b1, "CS# should be released");
 
     // ---- bad length and unknown opcode ----
     ep1_cmd1(8'h01);
@@ -371,7 +437,6 @@ module tb_usb_tb;
     ep1_cmd1(8'h7F);
     in_xfer(4'd1, nn);
     check(nn == 2 && rxb[1] == 8'h7F && rxb[2] == 8'h02, "unknown opcode status");
-    check(led_w === 1'b0, "LED must stay off");
 
     #5000;
     if (errors == 0) $display("TB_USB: PASS");
@@ -381,7 +446,7 @@ module tb_usb_tb;
 
   // watchdog
   initial begin
-    #30000000;
+    #80000000;
     $display("TB_USB: TIMEOUT");
     $finish;
   end

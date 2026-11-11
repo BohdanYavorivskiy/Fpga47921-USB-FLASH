@@ -1,4 +1,4 @@
-// RTL testbench: btn_led (button -> two LED blinks), shortened timing
+// RTL testbench: btn_led boot and button blinks, shortened timing
 
 `timescale 1ns / 1ps
 
@@ -15,7 +15,7 @@ module tb_blink_tb;
   always @(posedge clk) tdiv <= tdiv + 2'd1;
   wire tick = (tdiv == 2'd3);
 
-  btn_led #(.DEB_BITS(2), .DEB_INIT(0), .PH_BITS(4), .PH_INIT(0), .BOOT_BLINKS(3))
+  btn_led #(.DEB_BITS(2), .DEB_INIT(0), .PH_BITS(4), .PH_INIT(0), .BOOT_BLINKS(5))
     dut (.clk(clk), .rst(rst), .btn(btn), .tick(tick), .led(led));
 
   integer rises = 0, errors = 0;
@@ -30,26 +30,26 @@ module tb_blink_tb;
     $dumpvars (0, tb_blink_tb);
 
     #100 rst = 0;
-    #8000;                       // power-up sequence: 3 blinks (6 phases x 1.28 us)
-    if (rises != 3) begin errors = errors + 1; $display("FAIL: expected 3 boot blinks, got %0d", rises); end
+    #16000;                      // power-up sequence: 5 blinks (10 phases x 1.28 us)
+    if (rises != 5) begin errors = errors + 1; $display("FAIL: expected 5 boot blinks, got %0d", rises); end
     #500;
     if (led) begin errors = errors + 1; $display("FAIL: LED on before press"); end
 
     // bouncing press
     btn = 1; #40; btn = 0; #60; btn = 1; #40; btn = 0; #40; btn = 1;
     #8000;
-    if (rises != 5) begin errors = errors + 1; $display("FAIL: expected 5 total blinks, got %0d", rises); end
+    if (rises != 7) begin errors = errors + 1; $display("FAIL: expected 7 total blinks, got %0d", rises); end
     btn = 0;
     #1000;
     if (led) begin errors = errors + 1; $display("FAIL: LED stuck on"); end
 
     // second press
     btn = 1; #8000; btn = 0; #1000;
-    if (rises != 7) begin errors = errors + 1; $display("FAIL: expected 7 total blinks, got %0d", rises); end
+    if (rises != 9) begin errors = errors + 1; $display("FAIL: expected 9 total blinks, got %0d", rises); end
 
     // glitch shorter than debounce must be ignored
     btn = 1; #100; btn = 0; #8000;
-    if (rises != 7) begin errors = errors + 1; $display("FAIL: glitch triggered blink (%0d)", rises); end
+    if (rises != 9) begin errors = errors + 1; $display("FAIL: glitch triggered blink (%0d)", rises); end
 
     if (errors == 0) $display("TB_BLINK: PASS");
     else             $display("TB_BLINK: FAIL, %0d errors", errors);

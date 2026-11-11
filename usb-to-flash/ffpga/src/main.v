@@ -36,6 +36,17 @@
     output usb_pu_oe,       // GPIO26_OE
 
     // ----------------------------------------------
+    // SPI master (CS#, SCK, MISO, MOSI)
+    // ----------------------------------------------
+    output spi_cs,
+    output spi_cs_oe,
+    output spi_clk,
+    output spi_clk_oe,
+    input  spi_miso_i,
+    output spi_mosi,
+    output spi_mosi_oe,
+
+    // ----------------------------------------------
     // Button (GPIO36, active high) and LED (GPIO4, active high)
     // ----------------------------------------------
     input  btn,             // GPIO36_IN
@@ -93,9 +104,11 @@
         .tx_busy   (tx_busy)
     );
 
-    wire        led_set, led_off;
-    wire [15:0] led_ms;
-    wire        led_usb, led_btn, tick_ms;
+    wire        led_force, usb_act, tick_ms;
+    wire        led_usb, led_btn;
+    wire        spi_start, spi_cs_en, spi_busy, spi_done, spi_sck, spi_mosi_w;
+    wire [7:0]  spi_tx, spi_rx;
+    wire [3:0]  spi_div;
 
     usb_dev u_dev (
         .clk       (i_clk),
@@ -110,19 +123,45 @@
         .tx_data   (tx_data),
         .tx_valid  (tx_valid),
         .tx_next   (tx_next),
-        .led_set   (led_set),
-        .led_off   (led_off),
-        .led_ms    (led_ms)
+        .led_force (led_force),
+        .act       (usb_act),
+        .spi_start (spi_start),
+        .spi_tx    (spi_tx),
+        .spi_cs_en (spi_cs_en),
+        .spi_div   (spi_div),
+        .spi_rx    (spi_rx),
+        .spi_busy  (spi_busy),
+        .spi_done  (spi_done)
     );
+
+    spi_master u_spi (
+        .clk     (i_clk),
+        .rst     (rst),
+        .start   (spi_start),
+        .tx_data (spi_tx),
+        .div     (spi_div),
+        .miso    (spi_miso_i),
+        .sck     (spi_sck),
+        .mosi    (spi_mosi_w),
+        .busy    (spi_busy),
+        .done    (spi_done),
+        .rx_data (spi_rx)
+    );
+
+    assign spi_cs      = ~spi_cs_en;
+    assign spi_cs_oe   = 1'b1;
+    assign spi_clk     = spi_sck;
+    assign spi_clk_oe  = 1'b1;
+    assign spi_mosi    = spi_mosi_w;
+    assign spi_mosi_oe = 1'b1;
 
     led_ctrl u_led_ctrl (
         .clk (i_clk),
         .rst (rst),
-        .set (led_set),
-        .off (led_off),
-        .ms  (led_ms),
-        .led (led_usb),
-        .tick_ms (tick_ms)
+        .force_on (led_force),
+        .act      (usb_act),
+        .led      (led_usb),
+        .tick_ms  (tick_ms)
     );
 
     assign usb_dp   = dp_o;
@@ -135,9 +174,9 @@
     assign usb_pu_oe = ~rst;
 
     // ----------------------------------------------
-    // "Bitstream is loaded" indicator: LED blinks twice on button press
+    // "Bitstream is loaded" indicator: five boot blinks, two per button press.
     // ----------------------------------------------
-    btn_led u_btn_led (
+    btn_led #(.BOOT_BLINKS(4)) u_btn_led (
         .clk (i_clk),
         .rst (rst),
         .btn (btn),

@@ -1,15 +1,15 @@
-// LED (active high) blinks BOOT_BLINKS times (3) after power-up / reset release,
+// LED (active high) blinks BOOT_BLINKS times after power-up / reset release,
 // and twice per button press (active high). Confirms that the bitstream is loaded.
-// Timing comes from a shared 1 ms tick (led_ctrl.tick_ms) instead of private
-// free-running counters: debounce = 2^DEB_BITS - DEB_INIT ticks (11 ms),
-// LED phase = 2^PH_BITS - PH_INIT ticks (175 ms).
+// Timing comes from the shared 1.365 ms tick (led_ctrl.tick_ms) instead of private
+// free-running counters: debounce = 2^DEB_BITS - DEB_INIT ticks (8 -> 10.9 ms),
+// LED phase = 2^PH_BITS - PH_INIT ticks (128 -> 175 ms).
 
 module btn_led #(
     parameter DEB_BITS = 4,
-    parameter DEB_INIT = 5,
+    parameter DEB_INIT = 8,
     parameter PH_BITS  = 8,
-    parameter PH_INIT  = 81,
-    parameter BOOT_BLINKS = 3     // blinks after reset; 0 disables
+    parameter PH_INIT  = 128,
+    parameter BOOT_BLINKS = 4     // blinks after reset; 0 disables
 ) (
     input  wire clk,
     input  wire rst,
@@ -48,30 +48,30 @@ module btn_led #(
     end
 
     // blink: odd phases = on, even = off; last phase = 2*blinks
-    reg [2:0]         phase;
-    reg [2:0]         last;       // final phase of the running sequence
+    reg [3:0]         phase;
+    reg [3:0]         last;       // final phase of the running sequence
     reg               boot;       // pending power-up sequence
     reg [PH_BITS-1:0] pcnt;
     always @(posedge clk) begin
         if (rst) begin
-            phase <= 3'd0;
+            phase <= 4'd0;
             pcnt  <= PH_INIT;
             boot  <= (BOOT_BLINKS != 0);
-        end else if (phase == 3'd0) begin
+        end else if (phase == 4'd0) begin
             pcnt <= PH_INIT;
             if (boot) begin
                 boot  <= 1'b0;
                 last  <= 2 * BOOT_BLINKS;
-                phase <= 3'd1;
+                phase <= 4'd1;
             end else if (press) begin
-                last  <= 3'd4;
-                phase <= 3'd1;
+                last  <= 4'd4;
+                phase <= 4'd1;
             end
         end else if (tick) begin
             pcnt <= pcnt + 1'b1;
             if (&pcnt) begin
                 pcnt  <= PH_INIT;
-                phase <= (phase == last) ? 3'd0 : phase + 3'd1;
+                phase <= (phase == last) ? 4'd0 : phase + 4'd1;
             end
         end
     end

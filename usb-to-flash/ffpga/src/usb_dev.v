@@ -1,6 +1,6 @@
 // USB Full-Speed device SIE + endpoints.
 //   EP0 : control (GET_DESCRIPTOR, SET_ADDRESS, SET_CONFIGURATION, ...), max packet 64
-//   EP1 : vendor bulk OUT/IN, max packet 32: command on OUT, 2-byte response {opcode, status} on IN
+//   EP1 : vendor bulk OUT/IN, max packet 32: command on OUT, response {opcode, status[, data]} on IN
 
 module usb_dev (
     input  wire       clk,
@@ -18,10 +18,18 @@ module usb_dev (
     output wire       tx_valid,
     input  wire       tx_next,
 
-    // LED command outputs
-    output reg        led_set,
-    output reg        led_off,
-    output reg [15:0] led_ms
+    // LED / activity
+    output reg        led_force,   // LED forced on by command
+    output reg        act,         // pulse: USB transaction addressed to us
+
+    // SPI master interface (CS# is driven directly from spi_cs_en)
+    output reg        spi_start,
+    output wire [7:0] spi_tx,
+    output reg        spi_cs_en,   // 1 = CS# asserted (low)
+    output reg  [3:0] spi_div,
+    input  wire [7:0] spi_rx,
+    input  wire       spi_busy,
+    input  wire       spi_done
 );
 
     // ------------------------------------------------------------------
@@ -38,10 +46,16 @@ module usb_dev (
     localparam [1:0] S_ROM = 2'd0, S_ZERO = 2'd1, S_CFG = 2'd2, S_RESP = 2'd3;
 
     // EP1 command protocol (host -> device, bulk OUT), response on bulk IN: {opcode, status}
-    //   0x01 LED_SET  <ms_lo> <ms_hi>  : LED on for ms (1..65534); 0xFFFF = on forever; 0 = off
-    //   0x02 LED_OFF                   : LED off
-    // status: 0 = OK, 1 = bad length, 2 = unknown opcode
-    localparam [7:0] OP_LED_SET = 8'h01, OP_LED_OFF = 8'h02;
+    //   0x01 LED_SET  <ms_lo> <ms_hi>  : ms != 0 -> LED forced on (no timer), 0 -> release
+    //   0x02 LED_OFF                   : release LED
+    //   0x10 SPI_XFER <tx>             : response {0x10, status, rx}; status 0 = ok,
+    //                                    1 = busy, 3 = bad length, 4 = CS# not asserted
+    //   0x11 SPI_CS   <0|1>            : 1 asserts CS#, 0 releases it
+    //   0x12 SPI_DIV  <1..15>          : SCK = clk / (2 * div)
+    // status: 0 = OK, 1 = busy/bad value, 2 = unknown opcode,
+    //         3 = bad transfer length, 4 = CS# not asserted
+    localparam [7:0] OP_LED_SET = 8'h01, OP_LED_OFF = 8'h02,
+                     OP_SPI_XFER = 8'h10, OP_SPI_CS = 8'h11, OP_SPI_DIV = 8'h12;
 
     // ------------------------------------------------------------------
     // Descriptor ROM: device (0..17), configuration (18..49)
@@ -152,8 +166,9 @@ module usb_dev (
 
     // EP1: ep1_full = a 2-byte response {resp_op, resp_st} is waiting for the host
     reg       ep1_full, ep1_in_tog, ep1_out_tog;
-    reg [7:0] c_h;                     // 3rd data byte (c_op = tb1, c_l = tb2)
-    reg [7:0] resp_op, resp_st;
+    reg       c_hnz;                   // 3rd data byte != 0 (command = tb1, arg = tb2)
+    reg [7:0] resp_op, resp_st, resp_data;
+    reg       resp_long;               // response carries resp_data (3 bytes)
 
     // TX packet description
     reg [7:0]  tx_pid;
@@ -174,7 +189,8 @@ module usb_dev (
         case (tx_src)
             S_ROM:   dbyte = rom(daddr);
             S_CFG:   dbyte = {7'd0, cfg};
-            S_RESP:  dbyte = (tx_idx == 7'd1) ? resp_op : resp_st;
+            S_RESP:  dbyte = (tx_idx == 7'd1) ? resp_op :
+                             (tx_idx == 7'd2) ? resp_st : resp_data;
             default: dbyte = 8'h00;
         endcase
     end
@@ -189,6 +205,7 @@ module usb_dev (
                                                     tx_crc[4], tx_crc[5], tx_crc[6], tx_crc[7]};
     end
     assign tx_data = txd;
+    assign spi_tx  = tb2;
 
     // ------------------------------------------------------------------
     // Transaction handling
@@ -229,8 +246,8 @@ module usb_dev (
     always @(posedge clk) begin
         tx_start <= 1'b0;
         go = 1'b0;
-        led_set <= 1'b0;
-        led_off <= 1'b0;
+        act       <= 1'b0;
+        spi_start <= 1'b0;
 
         // capture header bytes
         if (byte_v) begin
@@ -238,7 +255,7 @@ module usb_dev (
                 6'd0: pid <= byte_d;
                 6'd1: begin tb1 <= byte_d; if (expect_ == E_SETUP) s_in <= byte_d[7]; end
                 6'd2: begin tb2 <= byte_d; if (expect_ == E_SETUP) s_req <= byte_d; end
-                6'd3: begin c_h <= byte_d; if (expect_ == E_SETUP) s_vall <= byte_d[6:0]; end
+                6'd3: begin c_hnz <= |byte_d; if (expect_ == E_SETUP) s_vall <= byte_d[6:0]; end
                 6'd4: if (expect_ == E_SETUP) s_valh <= (byte_d == 8'd1) ? 2'd1 : (byte_d == 8'd2) ? 2'd2 : 2'd0;
                 6'd7: if (expect_ == E_SETUP) s_lenl <= byte_d;
                 6'd8: if (expect_ == E_SETUP) s_lenh_nz <= |byte_d;
@@ -259,12 +276,16 @@ module usb_dev (
             tx_idx      <= 7'd1;
             tx_has      <= 1'b0;
             tx_len      <= 7'd0;
+            led_force   <= 1'b0;
+            spi_cs_en   <= 1'b0;
+            spi_div     <= 4'd1;
         end else begin
             if (eop_q && f_valid) begin
                 case (pid[3:0])
                     // ---------------- tokens ----------------
                     4'h1, 4'h9, 4'hD: begin
                         if (f_tok) begin
+                            act      <= 1'b1;
                             wait_ack <= 1'b0;
                             expect_  <= E_NONE;
                             case (pid[3:0])
@@ -298,7 +319,8 @@ module usb_dev (
                                     end else if (tep == 4'd1) begin
                                         if (ep1_full && cfg) begin
                                             go = 1'b1; rpid = ep1_in_tog ? PID_DATA1 : PID_DATA0;
-                                            rhas = 1'b1; rsrc = S_RESP; rbase = 6'd0; rlen = 6'd2;
+                                            rhas = 1'b1; rsrc = S_RESP; rbase = 6'd0;
+                                            rlen = resp_long ? 6'd3 : 6'd2;
                                             wait_ack <= 1'b1; ack_ep <= 1'b1;
                                         end else begin
                                             go = 1'b1; rpid = PID_NAK; rhas = 1'b0;
@@ -389,24 +411,52 @@ module usb_dev (
                                         ep1_full    <= 1'b1;         // response ready (replaces any unread one)
                                         resp_op     <= tb1;
                                         resp_st     <= 8'd2;         // unknown opcode
+                                        resp_long   <= 1'b0;
+                                        resp_data   <= 8'd0;
                                         if (ridx == 6'd3) resp_st <= 8'd1;   // empty packet
                                         else begin
                                             case (tb1)
                                                 OP_LED_SET: begin
                                                     if (ridx == 6'd6) begin
-                                                        resp_st <= 8'd0;
-                                                        led_set <= 1'b1;
-                                                        led_ms  <= {c_h, tb2};
+                                                        resp_st   <= 8'd0;
+                                                        led_force <= (tb2 != 8'd0) || c_hnz;
                                                     end else begin
                                                         resp_st <= 8'd1;
                                                     end
                                                 end
                                                 OP_LED_OFF: begin
                                                     if (ridx == 6'd4) begin
-                                                        resp_st <= 8'd0;
-                                                        led_off <= 1'b1;
+                                                        resp_st   <= 8'd0;
+                                                        led_force <= 1'b0;
                                                     end else begin
                                                         resp_st <= 8'd1;
+                                                    end
+                                                end
+                                                OP_SPI_XFER: begin
+                                                    resp_long <= 1'b1;
+                                                    if (ridx != 6'd5)    resp_st <= 8'd3;
+                                                    else if (spi_busy)   resp_st <= 8'd1;
+                                                    else if (!spi_cs_en) resp_st <= 8'd4;
+                                                    else begin
+                                                        ep1_full  <= 1'b0;   // response comes from spi_done
+                                                        spi_start <= 1'b1;
+                                                    end
+                                                end
+                                                OP_SPI_CS: begin
+                                                    if (ridx != 6'd5 || tb2[7:1] != 7'd0 || spi_busy) begin
+                                                        resp_st <= 8'd1;
+                                                    end else begin
+                                                        resp_st   <= 8'd0;
+                                                        spi_cs_en <= tb2[0];
+                                                    end
+                                                end
+                                                OP_SPI_DIV: begin
+                                                    if (ridx != 6'd5 || tb2[7:4] != 4'd0 ||
+                                                        tb2[3:0] == 4'd0 || spi_busy) begin
+                                                        resp_st <= 8'd1;
+                                                    end else begin
+                                                        resp_st <= 8'd0;
+                                                        spi_div <= tb2[3:0];
                                                     end
                                                 end
                                                 default: ;
@@ -440,6 +490,15 @@ module usb_dev (
 
                     default: ;
                 endcase
+            end
+
+            // SPI byte finished: queue the response with the received byte
+            if (spi_done) begin
+                ep1_full  <= 1'b1;
+                resp_op   <= OP_SPI_XFER;
+                resp_st   <= 8'd0;
+                resp_data <= spi_rx;
+                resp_long <= 1'b1;
             end
 
             // ---------------- TX bookkeeping ----------------
